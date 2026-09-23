@@ -131,7 +131,12 @@ def main():
 
     def refresh():
         p = os.path.join(tempfile.gettempdir(), 'wall_prev.png')
-        current().resize((960, 540)).save(p)
+        prev = current().resize((960, 540))
+        for r, idx in _last_rects:  # 選中的小圖描淡黃框，只在預覽，不進存檔
+            if idx == S['sel']:
+                x0, y0, x1, y1 = [v // 2 for v in r]
+                ImageDraw.Draw(prev).rectangle([x0, y0, x1, y1], outline=(255, 255, 153), width=3)
+        prev.save(p)
         win['-V-'].update(filename=p)
 
     def move(ev):
