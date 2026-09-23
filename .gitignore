@@ -1,0 +1,8 @@
+settings.json
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+__pycache__/
