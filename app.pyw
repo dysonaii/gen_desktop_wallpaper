@@ -48,7 +48,7 @@ def font(size):
 
 
 _last_rects = []  # 每層小圖位置 [(rect, idx)]，給預覽拖曳做 hit-test
-_last_text_rect = None  # 文字 bbox，給預覽選中框
+_last_text_rects = []  # 每組文字 bbox [(rect, idx)]，給預覽選中框＋點選用
 
 
 def draw_doodles(d, doodles):
@@ -75,12 +75,16 @@ def render_doodles(doodles):
     return img
 
 
-def compose(text, color, layers, size=80, text_xy=(960, 200), text_op=100, doodles=()):
+def compose(texts, layers, doodles=(), _text=None, _color=None, size=80, text_xy=(960, 200), text_op=100):
     # 合成全尺寸桌布，回傳 RGB 圖；順手記錄各層位置供拖曳/框線用
     # ponytail: 座標一律中心點；RGBA 合一層，透明度不用分支；壞圖單層跳過
-    global _last_rects, _last_text_rect
+    # texts 為 [{'text','color','size','xy','op'}]；舊單組參數 (_text/_color/size/text_xy/text_op) 沒給 texts 時自動包一組
+    global _last_rects, _last_text_rects
     _last_rects = []
-    _last_text_rect = None
+    _last_text_rects = []
+    if texts is None:
+        texts = [{'text': _text or '', 'color': _color or '#ffffff',
+                  'size': size, 'xy': tuple(text_xy), 'op': text_op}] if _text else []
     base = Image.new('RGBA', (W, H), (0, 0, 0, 255))
     layer = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     for idx, L in enumerate(layers):
@@ -91,6 +95,11 @@ def compose(text, color, layers, size=80, text_xy=(960, 200), text_op=100, doodl
             small = Image.open(p).convert('RGBA')
         except Exception:
             continue
+        if L.get('key'):  # 去白底：四角 flood fill 吃連通背景白；框線圍住的白（如眼睛）吃不到
+            # ponytail: thresh=40 是 G/O/Y.jpg 實測值（20 吃不掉 G 角落的 JPEG 雜點，眼睛三張都安全）
+            for xy in ((0, 0), (small.width - 1, 0), (0, small.height - 1),
+                       (small.width - 1, small.height - 1)):
+                ImageDraw.floodfill(small, xy, (0, 0, 0, 0), thresh=40)
         op = L.get('op', 100)
         w = max(1, round(min(small.width, W // 2) * L.get('scale', 100) / 100))
         h = round(small.height * w / small.width)
@@ -101,12 +110,31 @@ def compose(text, color, layers, size=80, text_xy=(960, 200), text_op=100, doodl
         x0, y0 = round(cx - w / 2), round(cy - h / 2)
         layer.paste(small, (x0, y0))  # 無 mask 直接蓋，透明層上等同混合，只算一次 alpha
         _last_rects.append(((x0, y0, x0 + w, y0 + h), idx))
-    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
-    f = font(size)
     d = ImageDraw.Draw(layer)
-    if text:
-        _last_text_rect = d.textbbox(text_xy, text, font=f, anchor='mm')
-    d.text(text_xy, text, fill=(r, g, b, round(255 * text_op / 100)), font=f, anchor='mm')
+    for idx, T in enumerate(texts):
+        t = T.get('text', '')
+        if not t:
+            continue
+        try:
+            r, g, b = (int(T.get('color', '#ffffff')[i:i + 2], 16) for i in (1, 3, 5))
+        except ValueError:
+            r, g, b = (255, 255, 255)
+        f = font(T.get('size', 80))
+        xy = tuple(T.get('xy') or (W // 2, 200))
+        rot = T.get('rot', 0)
+        alpha = round(255 * T.get('op', 100) / 100)
+        if rot:  # 旋轉字：小塊透明層畫好再轉，貼回中心點（跟小圖同招）
+            l, tp, rgt, btm = d.textbbox(xy, t, font=f, anchor='mm')
+            tmp = Image.new('RGBA', (max(1, rgt - l), max(1, btm - tp)), (0, 0, 0, 0))
+            ImageDraw.Draw(tmp).text((tmp.width / 2, tmp.height / 2), t,
+                                     fill=(r, g, b, alpha), font=f, anchor='mm')
+            tmp = tmp.rotate(rot, expand=True, resample=Image.BICUBIC)
+            x0, y0 = round(xy[0] - tmp.width / 2), round(xy[1] - tmp.height / 2)
+            layer.paste(tmp, (x0, y0), tmp)
+            _last_text_rects.append(((x0, y0, x0 + tmp.width, y0 + tmp.height), idx))
+        else:
+            _last_text_rects.append((d.textbbox(xy, t, font=f, anchor='mm'), idx))
+            d.text(xy, t, fill=(r, g, b, alpha), font=f, anchor='mm')
     draw_doodles(d, doodles)  # 塗鴉蓋最上層
     return Image.alpha_composite(base, layer).convert('RGB')
 
@@ -133,6 +161,7 @@ def parse_wh(s):
 def main():
     # 建 GUI、綁事件、跑主迴圈
     sg.theme('DarkBlack1')
+    #sg.set_options(suppress_raise_key_errors=False, suppress_error_popups=False, suppress_key_guessing=False)
     global W, H
     try:  # ponytail: 主螢幕尺寸當預設，失敗回退 1920x1080
         u = ctypes.windll.user32
@@ -147,7 +176,7 @@ def main():
     W, H = cfg.get('W') or detW, cfg.get('H') or detH
     if W < 1 or H < 1:
         W, H = detW, detH
-    PW, PH = 960, round(960 * H / W)
+    PW, PH = 1080, round(1080 * H / W)  # ponytail: 預覽寬對齊小圖旋轉滑桿右緣（實測 1083，取整）
     PRESETS = []
     cands = [f'{detW}x{detH}（偵測）']
     if spanW > detW or spanH > detH:
@@ -155,9 +184,23 @@ def main():
     for o in cands + ['1920x1080', '2560x1080', '2560x1440', '3840x2160', '1366x768']:
         if o.split('（')[0] not in [p.split('（')[0] for p in PRESETS]:
             PRESETS.append(o)
-    S = {'text_xy': tuple(cfg.get('text_xy') or (W // 2, 200)), 'size': cfg.get('size', 80),
-         'text_op': cfg.get('text_op', 100), 'sel': 0, 'active': cfg.get('active', 'text'),
-         'doodle': False, 'doodles': [], 'rect': None, 'imgs': cfg.get('imgs') or []}
+    S = {'tsel': 0, 'sel': 0, 'active': cfg.get('active', 'text'),
+         'doodle': False, 'doodles': [], 'rect': None, 'imgs': cfg.get('imgs') or [],
+         'texts': cfg.get('texts') or []}
+    for T in S['texts']:
+        T.setdefault('text', '')
+        T.setdefault('color', '#ffffff')
+        T.setdefault('size', 80)
+        T.setdefault('op', 100)
+        T.setdefault('rot', 0)
+        T.setdefault('xy', None)
+        if T['xy']:
+            T['xy'] = clamp_xy(tuple(T['xy']), W, H)
+    if not S['texts']:  # 舊版單組文字搬過來
+        S['texts'] = [{'text': cfg.get('text', 'Hello'), 'color': cfg.get('color', '#ffffff'),
+                       'size': cfg.get('size', 80), 'op': cfg.get('text_op', 100), 'rot': 0,
+                       'xy': tuple(cfg.get('text_xy') or (W // 2, 200))}]
+        S['texts'][0]['xy'] = clamp_xy(S['texts'][0]['xy'], W, H)
     for s in cfg.get('doodles') or []:
         try:
             S['doodles'].append({'color': s.get('color', '#ffffff'),
@@ -172,23 +215,30 @@ def main():
         L.setdefault('scale', 100)
         L.setdefault('rot', 0)
         L.setdefault('op', 100)
+        L.setdefault('key', False)
         L.setdefault('xy', None)
         if L['xy']:
             L['xy'] = clamp_xy(tuple(L['xy']), W, H)
-    S['text_xy'] = clamp_xy(S['text_xy'], W, H)
     if S['active'] != 'text' and not (isinstance(S['active'], int) and 0 <= S['active'] < len(S['imgs'])):
         S['active'] = 'text'
+    S['tsel'] = min(max(cfg.get('tsel', 0), 0), len(S['texts']) - 1)
+    T0 = S['texts'][S['tsel']]
     L0 = S['imgs'][0] if S['imgs'] else {}
     lay = [
-        [sg.Text('文字'), sg.Input(cfg.get('text', 'Hello'), key='-T-', enable_events=True),
+        [sg.Text('文字'), sg.Input(T0.get('text', ''), key='-T-', size=20, enable_events=True),
          sg.ColorChooserButton('顏色', key='-CC-', target='-C-'),
-         sg.Input(cfg.get('color', '#ffffff'), key='-C-', size=8, enable_events=True),
-         sg.Text('小圖'), sg.Listbox([os.path.basename(L['path']) for L in S['imgs']], size=(24, 2),
+         sg.Input(T0.get('color', '#ffffff'), key='-C-', size=8, enable_events=True),
+         sg.Listbox([t.get('text', '')[:12] or '(空)' for t in S['texts']], size=(14, 2),
+         key='-TL-', enable_events=True),
+         sg.Button('文字+'), sg.Button('文字-'),
+         sg.Text('小圖'), sg.Listbox([os.path.basename(L['path']) for L in S['imgs']], size=(18, 2),
          key='-L-', enable_events=True),
-         sg.Button('加入'), sg.Button('移除'),
+         sg.Button('加入'), sg.Button('移除'), sg.Button('複製'),
+         sg.Button('去白底✓' if S['imgs'] and S['imgs'][0].get('key') else '去白底', key='去白底'),
         ],
-        [sg.Text('字級'), sg.Slider((20, 200), S['size'], orientation='h', size=(12, 15), key='-FS-', enable_events=True),
-         sg.Text('文字透明'), sg.Slider((0, 100), S['text_op'], orientation='h', size=(12, 15), key='-TO-', enable_events=True),
+        [sg.Text('字級'), sg.Slider((20, 200), T0.get('size', 80), orientation='h', size=(12, 15), key='-FS-', enable_events=True),
+         sg.Text('文字透明'), sg.Slider((0, 100), T0.get('op', 100), orientation='h', size=(12, 15), key='-TO-', enable_events=True),
+         sg.Text('文字旋轉'), sg.Slider((-180, 180), T0.get('rot', 0), orientation='h', size=(12, 15), key='-TR-', enable_events=True),
          sg.Text('小圖透明'), sg.Slider((0, 100), L0.get('op', 100), orientation='h', size=(12, 15), key='-IO-', enable_events=True),
          sg.Text('小圖縮放'), sg.Slider((10, 200), L0.get('scale', 100), orientation='h', size=(12, 15), key='-IS-', enable_events=True),
          sg.Text('小圖旋轉'), sg.Slider((-180, 180), L0.get('rot', 0), orientation='h', size=(12, 15), key='-IR-', enable_events=True),],
@@ -201,24 +251,32 @@ def main():
     ]
     win = sg.Window('桌布產生器', lay, finalize=True)
 
-    def snap():
-        # 收集當下全部設定，供存檔用
-        return {'text': win['-T-'].get(), 'color': win['-C-'].get(), 'W': W, 'H': H,
-                'size': S['size'], 'text_op': S['text_op'], 'text_xy': list(S['text_xy']),
-                'active': S['active'],
+    def snapshot():
+        # 純 S 組裝存檔，不碰 widget（關閉時 widget 可能已死，一碰就炸）
+        return {'W': W, 'H': H, 'tsel': S['tsel'], 'active': S['active'],
+                'texts': [{'text': T['text'], 'color': T['color'], 'size': T['size'],
+                           'op': T['op'], 'rot': T.get('rot', 0),
+                           'xy': list(T['xy']) if T['xy'] else None}
+                          for T in S['texts']],
                 'doodles': [{'color': s['color'], 'pts': [list(p) for p in s['pts']]}
                             for s in S['doodles']],
                 'imgs': [{'path': L['path'], 'xy': list(L['xy']) if L['xy'] else None,
-                          'scale': L['scale'], 'rot': L['rot'], 'op': L['op']} for L in S['imgs']]}
+                          'scale': L['scale'], 'rot': L['rot'], 'op': L['op'],
+                          'key': L.get('key', False)} for L in S['imgs']]}
+
+    def snap():
+        # 收集當下全部設定，供存檔用（視窗活著時才用：先把輸入框寫回 S）
+        sync_cur_text(silent=True)
+        return snapshot()
 
     def current():
         # 依當下輸入合成一張；失敗退回安全版（不洗版報錯）
-        t = win['-T-'].get()
-        c = win['-C-'].get().strip() or '#ffffff'
+        sync_cur_text(silent=True)
         try:
-            return compose(t, c, S['imgs'], S['size'], S['text_xy'], S['text_op'], S['doodles'])
+            return compose(S['texts'], S['imgs'], S['doodles'])
         except Exception:  # 打字中的半成品色碼就退回白字，不洗版報錯
-            return compose(t, '#ffffff', [], S['size'])
+            safe = [dict(T, color='#ffffff') for T in S['texts']]
+            return compose(safe, [], ())
 
     def refresh():
         # 重算合成＋更新預覽圖＋畫選中框
@@ -228,9 +286,11 @@ def main():
         for r, idx in _last_rects:  # 選中的小圖描淡黃框，只在預覽，不進存檔
             if idx == S['active']:
                 ImageDraw.Draw(prev).rectangle([round(v * k) for v in r], outline=(255, 255, 153), width=3)
-        if S['active'] == 'text' and _last_text_rect:  # 選中的文字描淡綠框
-            ImageDraw.Draw(prev).rectangle([round(v * k) for v in _last_text_rect],
-                                           outline=(153, 255, 153), width=2)
+        if S['active'] == 'text':  # 選中的文字描淡綠框
+            for r, idx in _last_text_rects:
+                if idx == S['tsel']:
+                    ImageDraw.Draw(prev).rectangle([round(v * k) for v in r],
+                                                   outline=(153, 255, 153), width=2)
         if S['rect']:  # 右鍵框選中：紅框，只在預覽
             ImageDraw.Draw(prev).rectangle([round(v * k) for v in S['rect']],
                                            outline=(255, 80, 80), width=2)
@@ -245,16 +305,53 @@ def main():
         # 回傳選中的圖層；沒有圖層回 None
         return S['imgs'][S['sel']] if S['imgs'] else None
 
+    def tsel():
+        # 回傳選中的文字；一定有（至少一組）
+        if not S['texts']:
+            S['texts'].append({'text': '', 'color': '#ffffff', 'size': 80, 'op': 100, 'rot': 0, 'xy': None})
+        S['tsel'] = min(max(S['tsel'], 0), len(S['texts']) - 1)
+        return S['texts'][S['tsel']]
+
+    def tnames():
+        # 文字清單顯示用（取前 12 字，空的顯示佔位）
+        return [t.get('text', '')[:12] or '(空)' for t in S['texts']]
+
+    def sync_text():
+        # 文字輸入框＋滑桿跟著選中文字走
+        T = tsel()
+        win['-T-'].update(value=T.get('text', ''))
+        win['-C-'].update(value=T.get('color', '#ffffff'))
+        win['-FS-'].update(value=T.get('size', 80))
+        win['-TO-'].update(value=T.get('op', 100))
+        win['-TR-'].update(value=T.get('rot', 0))
+
+    def sync_cur_text(silent=False):
+        # 輸入框寫回選中文字；色碼半成品 silent 時先吞下（等 current 退回白字）
+        # ponytail: Slider 沒 .get()，字級/透明只在滑桿事件用 v 寫回，這裡只同步文字＋顏色
+        T = tsel()
+        T['text'] = win['-T-'].get()
+        c = win['-C-'].get().strip() or '#ffffff'
+        if silent:
+            try:
+                tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+                T['color'] = c
+            except ValueError:
+                pass
+        else:
+            T['color'] = c
+        win['-TL-'].update(values=tnames(), set_to_index=[S['tsel']])
+
     def names():
         # 圖層檔名清單，清單元件顯示用
         return [os.path.basename(L['path']) for L in S['imgs']]
 
     def sync_sliders():
-        # 三根小圖滑桿跟著選中圖層的值走
+        # 三根小圖滑桿＋去白底燈號跟著選中圖層的值走
         L = sel() or {}
         win['-IO-'].update(value=L.get('op', 100))
         win['-IS-'].update(value=L.get('scale', 100))
         win['-IR-'].update(value=L.get('rot', 0))
+        win['去白底'].update('去白底✓' if L.get('key') else '去白底')
 
     def add_files(files):
         # 批次加入圖層（去重＋驗檔）；回傳新增數
@@ -273,7 +370,7 @@ def main():
         return n
 
     def press(ev):
-        # 預覽按下：塗鴉模式起筆；否則點中圖層選它開拖，點空處定位文字
+        # 預覽按下：塗鴉模式起筆；否則點中小圖/文字選它開拖，點空處定位選中文字
         fx, fy = move(ev)
         if S['doodle']:
             S['doodles'].append({'color': win['-C-'].get().strip() or '#ffffff', 'pts': [(fx, fy)]})
@@ -289,7 +386,15 @@ def main():
                 S['drag'] = idx
                 refresh()
                 return
-        S['text_xy'] = (fx, fy)
+        for r, idx in reversed(_last_text_rects):  # 文字後中（上層文字先中）
+            if r[0] <= fx <= r[2] and r[1] <= fy <= r[3]:
+                S['tsel'] = idx
+                S['active'] = 'text'
+                sync_text()
+                S['drag'] = 'text'
+                refresh()
+                return
+        tsel()['xy'] = (fx, fy)
         S['active'] = 'text'
         S['drag'] = 'text'
         refresh()
@@ -305,7 +410,7 @@ def main():
                     pts.append((fx, fy))
                     refresh()
         elif d == 'text':
-            S['text_xy'] = move(ev)
+            tsel()['xy'] = move(ev)
             refresh()
         elif isinstance(d, int) and d < len(S['imgs']):
             S['imgs'][d]['xy'] = move(ev)
@@ -374,22 +479,75 @@ def main():
     while True:
         e, v = win.read()
         if e in (sg.WIN_CLOSED, None):
-            save_cfg(snap())
+            try:  # 關閉只存 S，不碰 widget（輸入框有 enable_events，S 已經是最新的）
+                save_cfg(snapshot())
+            except Exception:
+                pass
             break
         if e in ('-T-', '-C-', '-CC-'):
+            sync_cur_text()
             refresh()
+        elif e == '文字+':
+            sync_cur_text(silent=True)
+            S['texts'].append({'text': 'Hello', 'color': tsel().get('color', '#ffffff'),
+                               'size': tsel().get('size', 80), 'op': 100, 'rot': 0, 'xy': (W // 2, 200)})
+            S['tsel'] = len(S['texts']) - 1
+            S['active'] = 'text'
+            sync_text()
+            refresh()
+        elif e == '文字-':
+            if len(S['texts']) > 1:
+                S['texts'].pop(S['tsel'])
+                S['tsel'] = max(0, min(S['tsel'], len(S['texts']) - 1))
+                sync_text()
+                refresh()
+        elif e == '-TL-':
+            idx = win['-TL-'].get_indexes()
+            if idx:
+                sync_cur_text(silent=True)
+                S['tsel'] = idx[0]
+                S['active'] = 'text'
+                sync_text()
+                refresh()
         elif e == '-WH-':
             wh = parse_wh(v['-WH-'])
             if wh:  # 打字中半成品（None）先忽略
                 W, H = wh
-                PW, PH = 960, round(960 * H / W)
+                PW, PH = 1080, round(1080 * H / W)
                 win['-F-'].update(value=f'桌面預覽 {W}x{H}')
                 win['-V-'].Widget.config(width=PW, height=PH)
-                S['text_xy'] = clamp_xy(S['text_xy'], W, H)
+                for T in S['texts']:
+                    if T['xy']:
+                        T['xy'] = clamp_xy(tuple(T['xy']), W, H)
                 for L in S['imgs']:
                     if L['xy']:
                         L['xy'] = clamp_xy(L['xy'], W, H)
                 save_cfg(snap())
+                refresh()
+        elif e == '複製':  # 複製選中對象：文字或小圖，原地偏移一份並選中新副本
+            sync_cur_text(silent=True)
+            if S['active'] == 'text':
+                T = dict(tsel())
+                x, y = T.get('xy') or (W // 2, 200)
+                T['xy'] = clamp_xy((x + 20, y + 20), W, H)
+                S['texts'].append(T)
+                S['tsel'] = len(S['texts']) - 1
+                sync_text()
+                refresh()
+            elif isinstance(S['active'], int) and sel():
+                L = dict(sel())
+                x, y = L.get('xy') or (W // 2, H // 2)
+                L['xy'] = clamp_xy((x + 20, y + 20), W, H)
+                S['imgs'].append(L)
+                S['sel'] = S['active'] = len(S['imgs']) - 1
+                win['-L-'].update(values=names(), set_to_index=[S['sel']])
+                sync_sliders()
+                refresh()
+        elif e == '去白底':  # toggle 選中小圖的去背開關（白底圖用；有關才吃得到眼睛外的背景白）
+            L = sel()
+            if L:
+                L['key'] = not L.get('key')
+                win['去白底'].update('去白底✓' if L['key'] else '去白底')
                 refresh()
         elif e == '加入':  # 不用 FilesBrowse：它預設 target 指到左邊 Listbox，路徑寫不回來
             f = sg.popup_get_file('選小圖', multiple_files=True,
@@ -410,8 +568,11 @@ def main():
                 S['sel'] = idx[0]
                 S['active'] = S['sel']
                 sync_sliders()
-        elif e in ('-FS-', '-TO-'):
-            S['size'], S['text_op'] = int(v['-FS-']), int(v['-TO-'])
+                refresh()
+        elif e in ('-FS-', '-TO-', '-TR-'):
+            T = tsel()
+            T['size'], T['op'] = int(v['-FS-']), int(v['-TO-'])
+            T['rot'] = int(v['-TR-'])
             refresh()
         elif e in ('-IO-', '-IS-', '-IR-'):
             L = sel()
