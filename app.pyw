@@ -141,7 +141,8 @@ def compose(texts, layers, doodles=(), _text=None, _color=None, size=80, text_xy
 
 def set_wallpaper(path):
     # 調 Windows API 把指定圖設為桌布
-    ctypes.windll.user32.SystemParametersInfoW(20, 0, path, 3)
+    # ponytail: flag=1 只寫入不廣播，3 的 SENDCHANGE 會等全系統視窗回應（實測卡 7 秒）
+    ctypes.windll.user32.SystemParametersInfoW(20, 0, path, 1)
 
 
 def clamp_xy(xy, w, h):
