@@ -197,7 +197,7 @@ def main():
         T.setdefault('xy', None)
         if T['xy']:
             T['xy'] = clamp_xy(tuple(T['xy']), W, H)
-    if not S['texts']:  # 舊版單組文字搬過來
+    if 'texts' not in cfg:  # 舊版單組文字搬過來；新版存過空清單就保持空
         S['texts'] = [{'text': cfg.get('text', 'Hello'), 'color': cfg.get('color', '#ffffff'),
                        'size': cfg.get('size', 80), 'op': cfg.get('text_op', 100), 'rot': 0,
                        'xy': tuple(cfg.get('text_xy') or (W // 2, 200))}]
@@ -220,10 +220,10 @@ def main():
         L.setdefault('xy', None)
         if L['xy']:
             L['xy'] = clamp_xy(tuple(L['xy']), W, H)
-    if S['active'] != 'text' and not (isinstance(S['active'], int) and 0 <= S['active'] < len(S['imgs'])):
+    if S['active'] not in ('text', None) and not (isinstance(S['active'], int) and 0 <= S['active'] < len(S['imgs'])):
         S['active'] = 'text'
-    S['tsel'] = min(max(cfg.get('tsel', 0), 0), len(S['texts']) - 1)
-    T0 = S['texts'][S['tsel']]
+    S['tsel'] = min(max(cfg.get('tsel', 0), 0), max(len(S['texts']) - 1, 0))
+    T0 = S['texts'][S['tsel']] if S['texts'] else {}
     L0 = S['imgs'][0] if S['imgs'] else {}
     lay = [
         [sg.Text('文字'), sg.Input(T0.get('text', ''), key='-T-', size=20, enable_events=True),
@@ -307,9 +307,9 @@ def main():
         return S['imgs'][S['sel']] if S['imgs'] else None
 
     def tsel():
-        # 回傳選中的文字；一定有（至少一組）
+        # 回傳選中的文字；可為 None（允許全刪）
         if not S['texts']:
-            S['texts'].append({'text': '', 'color': '#ffffff', 'size': 80, 'op': 100, 'rot': 0, 'xy': None})
+            return None
         S['tsel'] = min(max(S['tsel'], 0), len(S['texts']) - 1)
         return S['texts'][S['tsel']]
 
@@ -318,8 +318,8 @@ def main():
         return [t.get('text', '')[:12] or '(空)' for t in S['texts']]
 
     def sync_text():
-        # 文字輸入框＋滑桿跟著選中文字走
-        T = tsel()
+        # 文字輸入框＋滑桿跟著選中文字走；沒文字就清空
+        T = tsel() or {}
         win['-T-'].update(value=T.get('text', ''))
         win['-C-'].update(value=T.get('color', '#ffffff'))
         win['-FS-'].update(value=T.get('size', 80))
@@ -330,6 +330,9 @@ def main():
         # 輸入框寫回選中文字；色碼半成品 silent 時先吞下（等 current 退回白字）
         # ponytail: Slider 沒 .get()，字級/透明只在滑桿事件用 v 寫回，這裡只同步文字＋顏色
         T = tsel()
+        if T is None:
+            win['-TL-'].update(values=[])
+            return
         T['text'] = win['-T-'].get()
         c = win['-C-'].get().strip() or '#ffffff'
         if silent:
@@ -371,7 +374,7 @@ def main():
         return n
 
     def press(ev):
-        # 預覽按下：塗鴉模式起筆；否則點中小圖/文字選它開拖，點空處定位選中文字
+        # 預覽按下：塗鴉模式起筆；否則點中小圖/文字選它開拖，點空處清除選中框
         fx, fy = move(ev)
         if S['doodle']:
             S['doodles'].append({'color': win['-C-'].get().strip() or '#ffffff', 'pts': [(fx, fy)]})
@@ -395,14 +398,16 @@ def main():
                 S['drag'] = 'text'
                 refresh()
                 return
-        tsel()['xy'] = (fx, fy)
-        S['active'] = 'text'
-        S['drag'] = 'text'
+        # 點空處：清除選中框（不搬文字），兩邊清單也取消選取
+        S['active'] = None
+        S['drag'] = None
+        win['-L-'].update(set_to_index=[])
+        win['-TL-'].update(set_to_index=[])
         refresh()
 
     def motion(ev):
         # 預覽拖曳中：塗鴉收點／更新被拖目標座標
-        d = S.get('drag', 'text')
+        d = S.get('drag')
         if d == 'pen':
             if S['doodles']:
                 pts = S['doodles'][-1]['pts']
@@ -411,8 +416,10 @@ def main():
                     pts.append((fx, fy))
                     refresh()
         elif d == 'text':
-            tsel()['xy'] = move(ev)
-            refresh()
+            T = tsel()
+            if T is not None:
+                T['xy'] = move(ev)
+                refresh()
         elif isinstance(d, int) and d < len(S['imgs']):
             S['imgs'][d]['xy'] = move(ev)
             refresh()
@@ -490,16 +497,22 @@ def main():
             refresh()
         elif e == '文字+':
             sync_cur_text(silent=True)
-            S['texts'].append({'text': 'Hello', 'color': tsel().get('color', '#ffffff'),
-                               'size': tsel().get('size', 80), 'op': 100, 'rot': 0, 'xy': (W // 2, 200)})
+            _T = tsel() or {}
+            S['texts'].append({'text': 'Hello', 'color': _T.get('color', '#ffffff'),
+                               'size': _T.get('size', 80), 'op': 100, 'rot': 0, 'xy': (W // 2, 200)})
             S['tsel'] = len(S['texts']) - 1
             S['active'] = 'text'
             sync_text()
             refresh()
         elif e == '文字-':
-            if len(S['texts']) > 1:
+            if S['texts']:
                 S['texts'].pop(S['tsel'])
                 S['tsel'] = max(0, min(S['tsel'], len(S['texts']) - 1))
+                if not S['texts']:
+                    S['active'] = None
+                    win['-TL-'].update(values=[])
+                else:
+                    win['-TL-'].update(values=tnames(), set_to_index=[S['tsel']])
                 sync_text()
                 refresh()
         elif e == '-TL-':
@@ -527,7 +540,7 @@ def main():
                 refresh()
         elif e == '複製':  # 複製選中對象：文字或小圖，原地偏移一份並選中新副本
             sync_cur_text(silent=True)
-            if S['active'] == 'text':
+            if S['active'] == 'text' and tsel():
                 T = dict(tsel())
                 x, y = T.get('xy') or (W // 2, 200)
                 T['xy'] = clamp_xy((x + 20, y + 20), W, H)
@@ -572,9 +585,10 @@ def main():
                 refresh()
         elif e in ('-FS-', '-TO-', '-TR-'):
             T = tsel()
-            T['size'], T['op'] = int(v['-FS-']), int(v['-TO-'])
-            T['rot'] = int(v['-TR-'])
-            refresh()
+            if T is not None:
+                T['size'], T['op'] = int(v['-FS-']), int(v['-TO-'])
+                T['rot'] = int(v['-TR-'])
+                refresh()
         elif e in ('-IO-', '-IS-', '-IR-'):
             L = sel()
             if L:
