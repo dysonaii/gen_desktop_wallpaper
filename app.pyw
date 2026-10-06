@@ -192,7 +192,7 @@ def main():
     PRESETS = []
     cands = [f'{detW}x{detH}（偵測）']
     if spanW > detW or spanH > detH:
-        cands.append(f'{spanW}x{spanH}（橫跨）')
+        cands.append(f'{spanW}x{spanH}（跨螢幕）')
     for o in cands + ['1920x1080', '2560x1080', '2560x1440', '3840x2160', '1366x768']:
         if o.split('（')[0] not in [p.split('（')[0] for p in PRESETS]:
             PRESETS.append(o)
