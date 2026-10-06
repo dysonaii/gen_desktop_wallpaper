@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import time
+import winreg
 
 import PySimpleGUI as sg
 from PIL import Image, ImageDraw, ImageFont
@@ -16,6 +17,8 @@ except Exception:
 W, H = 1920, 1080
 OUT = os.path.join(os.path.expanduser('~'), 'Pictures', 'wallpaper.png')
 CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+STYLES = {'填滿': ('10', '0'), '全螢幕': ('6', '0'), '延展': ('2', '0'),
+          '並排': ('0', '1'), '置中': ('0', '0'), '跨螢幕': ('22', '0')}
 
 
 def load_cfg():
@@ -139,9 +142,17 @@ def compose(texts, layers, doodles=(), _text=None, _color=None, size=80, text_xy
     return Image.alpha_composite(base, layer).convert('RGB')
 
 
-def set_wallpaper(path):
-    # 調 Windows API 把指定圖設為桌布
+def set_wallpaper(path, style='填滿'):
+    # 調 Windows API 把指定圖設為桌布，style 同步 個人化->背景->選擇顯示方式
     # ponytail: flag=1 只寫入不廣播，3 的 SENDCHANGE 會等全系統視窗回應（實測卡 7 秒）
+    ws, tw = STYLES.get(style, STYLES['填滿'])
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Control Panel\Desktop',
+                            0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, 'WallpaperStyle', 0, winreg.REG_SZ, ws)
+            winreg.SetValueEx(k, 'TileWallpaper', 0, winreg.REG_SZ, tw)
+    except OSError:
+        pass
     ctypes.windll.user32.SystemParametersInfoW(20, 0, path, 1)
 
 
@@ -187,7 +198,8 @@ def main():
             PRESETS.append(o)
     S = {'tsel': 0, 'sel': 0, 'active': cfg.get('active', 'text'),
          'doodle': False, 'doodles': [], 'rect': None, 'imgs': cfg.get('imgs') or [],
-         'texts': cfg.get('texts') or []}
+         'texts': cfg.get('texts') or [],
+         'style': cfg.get('style') if cfg.get('style') in STYLES else '填滿'}
     for T in S['texts']:
         T.setdefault('text', '')
         T.setdefault('color', '#ffffff')
@@ -247,6 +259,8 @@ def main():
         #[sg.Text('（小圖可從檔案總管拖入；排版在預覽圖拖曳）')],
         [sg.Frame(f'桌面預覽 {W}x{H}', [[sg.Image(key='-V-', size=(PW, PH))]], key='-F-')],
         [sg.Button('下載桌布'), sg.Button('設為桌布'),
+         sg.Text('顯示方式'), sg.Combo(list(STYLES), default_value=S['style'],
+         key='-ST-', size=(8, 1), enable_events=True, readonly=True),
          sg.Button('塗鴉'), sg.Button('復原'), sg.Button('清空'), sg.Button('塗鴉轉圖層'),
          sg.Text('尺寸'), sg.Combo(PRESETS, default_value=f'{W}x{H}', key='-WH-', size=(16, 1),enable_events=True),
         ],
@@ -255,7 +269,7 @@ def main():
 
     def snapshot():
         # 純 S 組裝存檔，不碰 widget（關閉時 widget 可能已死，一碰就炸）
-        return {'W': W, 'H': H, 'tsel': S['tsel'], 'active': S['active'],
+        return {'W': W, 'H': H, 'tsel': S['tsel'], 'active': S['active'], 'style': S['style'],
                 'texts': [{'text': T['text'], 'color': T['color'], 'size': T['size'],
                            'op': T['op'], 'rot': T.get('rot', 0),
                            'xy': list(T['xy']) if T['xy'] else None}
@@ -269,6 +283,12 @@ def main():
     def snap():
         # 收集當下全部設定，供存檔用（視窗活著時才用：先把輸入框寫回 S）
         sync_cur_text(silent=True)
+        try:
+            st = win['-ST-'].get()
+            if st in STYLES:
+                S['style'] = st
+        except Exception:
+            pass
         return snapshot()
 
     def current():
@@ -524,6 +544,10 @@ def main():
                 S['active'] = 'text'
                 sync_text()
                 refresh()
+        elif e == '-ST-':
+            if v['-ST-'] in STYLES:
+                S['style'] = v['-ST-']
+                save_cfg(snap())
         elif e == '-WH-':
             wh = parse_wh(v['-WH-'])
             if wh:  # 打字中半成品（None）先忽略
@@ -623,7 +647,7 @@ def main():
                 sg.popup('已存到 ' + f)
         elif e == '設為桌布':
             current().save(OUT)
-            set_wallpaper(OUT)
+            set_wallpaper(OUT, S['style'])
             save_cfg(snap())
             sg.popup('已設為桌布')
     win.close()
